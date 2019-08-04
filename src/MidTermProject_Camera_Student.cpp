@@ -12,9 +12,13 @@
 #include <opencv2/features2d.hpp>
 #include <opencv2/xfeatures2d.hpp>
 #include <opencv2/xfeatures2d/nonfree.hpp>
+#include <iostream>
+#include <chrono>
+
 
 #include "dataStructures.h"
 #include "matching2D.hpp"
+#include "ringbuffer.h"
 
 using namespace std;
 
@@ -36,11 +40,28 @@ int main(int argc, const char *argv[])
     int imgFillWidth = 4;  // no. of digits which make up the file index (e.g. img-0001.png)
 
     // misc
-    int dataBufferSize = 2;       // no. of images which are held in memory (ring buffer) at the same time
-    vector<DataFrame> dataBuffer; // list of data frames which are held in memory at the same time
+    int                   dataBufferSize = 2;       // no. of images which are held in memory (ring buffer) at the same time
+    RingBuffer<DataFrame> dataBuffer(dataBufferSize); // list of data frames which are held in memory at the same time
+    
+
     bool bVis = false;            // visualize results
 
     /* MAIN LOOP OVER ALL IMAGES */
+
+    long totalFindTime  = 0;
+    long totalMatchTime = 0;
+    long totalDescTime  = 0;
+    int totalKeypoints  = 0;
+    int totalMatches    = 0;
+    int frameCount      = 0;
+    
+    string detectorType   = "SIFT"; //HARRIS, FAST, BRISK, ORB, AKAZE, SIFT
+    string descriptorType = "BRIEF";  // BRIEF, ORB, FREAK, AKAZE, SIFT
+
+    string matcherType           = "MAT_BF";     // MAT_BF, MAT_FLANN
+    string descriptorCompareType = "DES_BINARY";    // DES_BINARY, DES_HOG
+    string selectorType          = "SEL_KNN";      // SEL_NN, SEL_KNN
+
 
     for (size_t imgIndex = 0; imgIndex <= imgEndIndex - imgStartIndex; imgIndex++)
     {
@@ -71,20 +92,24 @@ int main(int argc, const char *argv[])
 
         // extract 2D keypoints from current image
         vector<cv::KeyPoint> keypoints; // create empty feature list for current image
-        string detectorType = "SHITOMASI";
+      
 
         //// STUDENT ASSIGNMENT
         //// TASK MP.2 -> add the following keypoint detectors in file matching2D.cpp and enable string-based selection based on detectorType
         //// -> HARRIS, FAST, BRISK, ORB, AKAZE, SIFT
 
-        if (detectorType.compare("SHITOMASI") == 0)
-        {
+        auto findTime = std::chrono::high_resolution_clock::now();
+        if (detectorType.compare("SHITOMASI") == 0){
             detKeypointsShiTomasi(keypoints, imgGray, false);
         }
-        else
-        {
-            //...
+        else if(detectorType.compare("HARRIS") == 0){
+            detKeypointsHarris(keypoints,imgGray,false);
+        }else{
+            detKeypointsModern(keypoints,imgGray,detectorType,false);
         }
+        totalFindTime += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - findTime).count();
+
+        
         //// EOF STUDENT ASSIGNMENT
 
         //// STUDENT ASSIGNMENT
@@ -95,7 +120,7 @@ int main(int argc, const char *argv[])
         cv::Rect vehicleRect(535, 180, 180, 150);
         if (bFocusOnVehicle)
         {
-            // ...
+            filterKeypoints(keypoints,vehicleRect);
         }
 
         //// EOF STUDENT ASSIGNMENT
@@ -125,8 +150,10 @@ int main(int argc, const char *argv[])
         //// -> BRIEF, ORB, FREAK, AKAZE, SIFT
 
         cv::Mat descriptors;
-        string descriptorType = "BRISK"; // BRIEF, ORB, FREAK, AKAZE, SIFT
+        auto descTime = std::chrono::high_resolution_clock::now();
         descKeypoints((dataBuffer.end() - 1)->keypoints, (dataBuffer.end() - 1)->cameraImg, descriptors, descriptorType);
+        totalDescTime += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - descTime).count();
+
         //// EOF STUDENT ASSIGNMENT
 
         // push descriptors for current frame to end of data buffer
@@ -140,18 +167,23 @@ int main(int argc, const char *argv[])
             /* MATCH KEYPOINT DESCRIPTORS */
 
             vector<cv::DMatch> matches;
-            string matcherType = "MAT_BF";        // MAT_BF, MAT_FLANN
-            string descriptorType = "DES_BINARY"; // DES_BINARY, DES_HOG
-            string selectorType = "SEL_NN";       // SEL_NN, SEL_KNN
-
+         
             //// STUDENT ASSIGNMENT
             //// TASK MP.5 -> add FLANN matching in file matching2D.cpp
             //// TASK MP.6 -> add KNN match selection and perform descriptor distance ratio filtering with t=0.8 in file matching2D.cpp
 
+            auto matchTime = std::chrono::high_resolution_clock::now();
             matchDescriptors((dataBuffer.end() - 2)->keypoints, (dataBuffer.end() - 1)->keypoints,
                              (dataBuffer.end() - 2)->descriptors, (dataBuffer.end() - 1)->descriptors,
-                             matches, descriptorType, matcherType, selectorType);
+                             matches, descriptorCompareType, matcherType, selectorType);
 
+            totalMatchTime += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - matchTime).count();
+
+            std::cout << matches.size() << " " << (dataBuffer.end() - 2)->keypoints.size() << " " << (dataBuffer.end() - 1)->keypoints.size()  << std::endl;
+            totalKeypoints += keypoints.size();
+            totalMatches   += matches.size();
+            frameCount++;
+     
             //// EOF STUDENT ASSIGNMENT
 
             // store matches in current data frame
@@ -174,12 +206,22 @@ int main(int argc, const char *argv[])
                 cv::namedWindow(windowName, 7);
                 cv::imshow(windowName, matchImg);
                 cout << "Press key to continue to next image" << endl;
-                cv::waitKey(0); // wait for key to be pressed
+                while( cv::waitKey(0) != 'a'){}; // wait for key to be pressed
             }
             bVis = false;
         }
 
     } // eof loop over all images
+
+    std::cout << "Detector                    " << detectorType << std::endl;
+    std::cout << "Descriptor                  " << descriptorType << std::endl;
+    std::cout << "Matcher                     " << matcherType << std::endl;
+    std::cout << "Average Keypoints Per Frame " << totalKeypoints / frameCount << std::endl;
+    std::cout << "Average Matches Per Frame   " << totalMatches / frameCount << std::endl;
+    std::cout << "Average Find Time           " << totalFindTime / (frameCount + 1) << " ms" << std::endl;
+    std::cout << "Average Desc Time           " << totalDescTime / (frameCount + 1) << " ms" << std::endl;
+    std::cout << "Average Match Time          " << totalMatchTime / (frameCount + 1) << " ms" << std::endl;
+    
 
     return 0;
 }
